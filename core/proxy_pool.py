@@ -58,6 +58,7 @@ PREFLIGHT_MAX_TIME_SECONDS = 10
 
 SCORE_THRESHOLD = 10.0
 REFRESH_IDLE_SECONDS = 21600  # 6h：避免轮询间隔较长时过早“忘记”扣分
+PROVIDER_REFRESH_MIN_SECONDS = 21600  # 6h：避免频繁触发 GitHub API 拉取导致限流
 
 PENALTY_PREFLIGHT = 100.0
 PENALTY_RISK = 60.0
@@ -327,24 +328,42 @@ class ProxyPool:
         self._ensure_dirs()
         out_path = self.providers_dir / "chromego.yaml"
 
+        # Prefer using a fresh cached provider to avoid GitHub API rate limits.
+        try:
+            if out_path.exists():
+                age = time.time() - out_path.stat().st_mtime
+                if age >= 0 and age < float(PROVIDER_REFRESH_MIN_SECONDS):
+                    logger.info("[PROXY_POOL] provider cache hit: age=%ss, skip fetch", int(age))
+                    return
+        except Exception:
+            # Cache check is best-effort.
+            pass
+
         if int(self.s.chromego_ip) == 0:
             ips = [1, 2, 3, 4, 5, 6]
         else:
             ips = [int(self.s.chromego_ip)]
 
-        merged: List[dict] = []
-        for ip in ips:
-            tmp_provider = self.state_dir / f"chromego-ip{ip}-provider.yaml"
-            raw_out = self.state_dir / f"chromego-ip{ip}-raw.yaml"
-            self._run_cgpool_fetch(ip=ip, out_path=tmp_provider, raw_out=raw_out)
-            with open(tmp_provider, "r", encoding="utf-8", errors="replace") as f:
-                data = yaml.safe_load(f) or {}
-            proxies = data.get("proxies") if isinstance(data, dict) else None
-            if not isinstance(proxies, list):
-                continue
-            for p in proxies:
-                if isinstance(p, dict):
-                    merged.append(p)
+        try:
+            merged: List[dict] = []
+            for ip in ips:
+                tmp_provider = self.state_dir / f"chromego-ip{ip}-provider.yaml"
+                raw_out = self.state_dir / f"chromego-ip{ip}-raw.yaml"
+                self._run_cgpool_fetch(ip=ip, out_path=tmp_provider, raw_out=raw_out)
+                with open(tmp_provider, "r", encoding="utf-8", errors="replace") as f:
+                    data = yaml.safe_load(f) or {}
+                proxies = data.get("proxies") if isinstance(data, dict) else None
+                if not isinstance(proxies, list):
+                    continue
+                for p in proxies:
+                    if isinstance(p, dict):
+                        merged.append(p)
+        except Exception as exc:
+            # If GitHub API is rate limited, reuse any existing provider to keep the system working.
+            if out_path.exists():
+                logger.warning("[PROXY_POOL] fetch failed, using cached provider: %s: %s", type(exc).__name__, str(exc)[:200])
+                return
+            raise
 
         if not merged:
             raise RuntimeError("no proxies fetched from chromego sources")
