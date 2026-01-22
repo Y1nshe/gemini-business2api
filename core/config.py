@@ -56,6 +56,9 @@ class BasicConfig(BaseModel):
     register_domain: str = Field(default="", description="默认注册域名（推荐）")
     pool_target_accounts: int = Field(default=0, ge=0, le=100, description="账号池目标数量（0=禁用自动补号）")
     pool_prune_disabled: bool = Field(default=False, description="是否自动删除 disabled=true 的账号")
+    proxy_pool_enabled: bool = Field(default=False, description="是否启用内置代理节点池（Chromego）")
+    proxy_pool_required: bool = Field(default=True, description="启用节点池后初始化失败是否中止（推荐开启）")
+    proxy_pool_chromego_ip: int = Field(default=0, ge=0, le=6, description="Chromego ip_Update 源选择（0=合并1..6）")
 
 
 class ImageGenerationConfig(BaseModel):
@@ -150,6 +153,9 @@ class ConfigManager:
         duckmail_api_key_raw = basic_data.get("duckmail_api_key", "")
         pool_target_raw = basic_data.get("pool_target_accounts", 0)
         pool_prune_disabled_raw = basic_data.get("pool_prune_disabled", False)
+        proxy_pool_enabled_raw = basic_data.get("proxy_pool_enabled", False)
+        proxy_pool_required_raw = basic_data.get("proxy_pool_required", True)
+        proxy_pool_chromego_ip_raw = basic_data.get("proxy_pool_chromego_ip", 0)
 
         basic_config = BasicConfig(
             api_key=basic_data.get("api_key") or "",
@@ -165,6 +171,9 @@ class ConfigManager:
             register_domain=str(register_domain_raw or "").strip(),
             pool_target_accounts=int(pool_target_raw),
             pool_prune_disabled=_parse_bool(pool_prune_disabled_raw, False),
+            proxy_pool_enabled=_parse_bool(proxy_pool_enabled_raw, False),
+            proxy_pool_required=_parse_bool(proxy_pool_required_raw, True),
+            proxy_pool_chromego_ip=int(proxy_pool_chromego_ip_raw),
         )
 
         # 4. 加载其他配置（从 YAML）

@@ -64,6 +64,9 @@ export interface Settings {
     register_domain?: string
     pool_target_accounts?: number
     pool_prune_disabled?: boolean
+    proxy_pool_enabled?: boolean
+    proxy_pool_required?: boolean
+    proxy_pool_chromego_ip?: number
   }
   retry: {
     max_new_session_tries: number

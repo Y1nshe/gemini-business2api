@@ -12,6 +12,7 @@ from core.config import config
 from core.duckmail_client import DuckMailClient
 from core.gemini_automation import GeminiAutomation
 from core.gemini_automation_uc import GeminiAutomationUC
+from core.proxy_pool import ProxyPool, classify_failure
 
 logger = logging.getLogger("gemini.register")
 
@@ -41,6 +42,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
+        proxy_pool: Optional[ProxyPool] = None,
     ) -> None:
         super().__init__(
             multi_account_mgr,
@@ -53,6 +55,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
             set_multi_account_mgr,
             log_prefix="REGISTER",
         )
+        self.proxy_pool = proxy_pool
 
     async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None) -> RegisterTask:
         """启动注册任务"""
@@ -106,9 +109,15 @@ class RegisterService(BaseTaskService[RegisterTask]):
     def _register_one(self, domain: Optional[str], task: RegisterTask) -> dict:
         """注册单个账户"""
         log_cb = lambda level, message: self._append_log(task, level, message)
+        pool = self.proxy_pool if (self.proxy_pool and self.proxy_pool.s.enabled) else None
+
+        # 邮件服务建议直连；若用户显式配置了 proxy，则继续使用。
+        duckmail_proxy = (config.basic.proxy or "").strip()
+        if pool and duckmail_proxy == pool.proxy_server:
+            duckmail_proxy = ""
         client = DuckMailClient(
             base_url=config.basic.duckmail_base_url,
-            proxy=config.basic.proxy,
+            proxy=duckmail_proxy,
             verify_ssl=config.basic.duckmail_verify_ssl,
             api_key=config.basic.duckmail_api_key,
             log_callback=log_cb,
@@ -116,36 +125,61 @@ class RegisterService(BaseTaskService[RegisterTask]):
         if not client.register_account(domain=domain):
             return {"success": False, "error": "duckmail register failed"}
 
-        # 根据配置选择浏览器引擎
-        browser_engine = (config.basic.browser_engine or "dp").lower()
-        headless = config.basic.browser_headless
+        # 自动化注册：若启用节点池，则按“预检->失败扣分->换节点重试”策略跑到成功或节点池耗尽。
+        while True:
+            automation_proxy = (config.basic.proxy or "").strip()
+            if pool:
+                try:
+                    pool.ensure_proxy_reachable()
+                    automation_proxy = pool.proxy_server
+                except Exception as exc:
+                    return {"success": False, "error": f"proxy pool unavailable: {type(exc).__name__}: {exc}"}
 
-        if browser_engine == "dp":
-            # DrissionPage 引擎：支持有头和无头模式
-            automation = GeminiAutomation(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy,
-                headless=headless,
-                log_callback=log_cb,
-            )
-        else:
-            # undetected-chromedriver 引擎：无头模式反检测能力弱，强制使用有头模式
-            if headless:
-                log_cb("warning", "UC engine: headless mode not recommended, forcing headed mode")
-                headless = False
-            automation = GeminiAutomationUC(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy,
-                headless=headless,
-                log_callback=log_cb,
-            )
+            # 根据配置选择浏览器引擎
+            browser_engine = (config.basic.browser_engine or "dp").lower()
+            headless = config.basic.browser_headless
 
-        try:
-            result = automation.login_and_extract(client.email, client)
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            if browser_engine == "dp":
+                # DrissionPage 引擎：支持有头和无头模式
+                automation = GeminiAutomation(
+                    user_agent=self.user_agent,
+                    proxy=automation_proxy,
+                    headless=headless,
+                    log_callback=log_cb,
+                )
+            else:
+                # undetected-chromedriver 引擎：无头模式反检测能力弱，强制使用有头模式
+                if headless:
+                    log_cb("warning", "UC engine: headless mode not recommended, forcing headed mode")
+                    headless = False
+                automation = GeminiAutomationUC(
+                    user_agent=self.user_agent,
+                    proxy=automation_proxy,
+                    headless=headless,
+                    log_callback=log_cb,
+                )
+
+            try:
+                result = automation.login_and_extract(client.email, client)
+            except Exception as exc:
+                result = {"success": False, "error": str(exc)}
+
+            if result.get("success"):
+                break
+
+            err = str(result.get("error") or "automation failed")
+            if not pool:
+                return {"success": False, "error": err}
+
+            kind, detail = classify_failure(err)
+            log_cb("warning", f"automation failed kind={kind}, detail={detail}; switching node")
+            try:
+                pool.on_failure(kind=kind, detail=detail)
+            except Exception as exc:
+                return {"success": False, "error": f"proxy pool exhausted: {type(exc).__name__}: {exc}"}
+
         if not result.get("success"):
-            return {"success": False, "error": result.get("error", "automation failed")}
+            return {"success": False, "error": str(result.get("error") or "automation failed")}
 
         config_data = result["config"]
         config_data["mail_provider"] = "duckmail"

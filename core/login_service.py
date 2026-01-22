@@ -14,6 +14,7 @@ from core.duckmail_client import DuckMailClient
 from core.gemini_automation import GeminiAutomation
 from core.gemini_automation_uc import GeminiAutomationUC
 from core.microsoft_mail_client import MicrosoftMailClient
+from core.proxy_pool import ProxyPool, classify_failure
 
 logger = logging.getLogger("gemini.login")
 
@@ -43,6 +44,7 @@ class LoginService(BaseTaskService[LoginTask]):
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
+        proxy_pool: Optional[ProxyPool] = None,
     ) -> None:
         super().__init__(
             multi_account_mgr,
@@ -56,6 +58,7 @@ class LoginService(BaseTaskService[LoginTask]):
             log_prefix="REFRESH",
         )
         self._is_polling = False
+        self.proxy_pool = proxy_pool
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
         """启动登录任务"""
@@ -123,6 +126,12 @@ class LoginService(BaseTaskService[LoginTask]):
         mail_tenant = account.get("mail_tenant") or "consumers"
 
         log_cb = lambda level, message: self._append_log(task, level, f"[{account_id}] {message}")
+        pool = self.proxy_pool if (self.proxy_pool and self.proxy_pool.s.enabled) else None
+
+        # 邮件服务建议直连；若用户显式配置了 proxy，则继续使用。
+        mail_proxy = (config.basic.proxy or "").strip()
+        if pool and mail_proxy == pool.proxy_server:
+            mail_proxy = ""
 
         # 创建邮件客户端
         if mail_provider == "microsoft":
@@ -133,7 +142,7 @@ class LoginService(BaseTaskService[LoginTask]):
                 client_id=mail_client_id,
                 refresh_token=mail_refresh_token,
                 tenant=mail_tenant,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 log_callback=log_cb,
             )
             client.set_credentials(mail_address)
@@ -143,7 +152,7 @@ class LoginService(BaseTaskService[LoginTask]):
             # DuckMail: account_id 就是邮箱地址
             client = DuckMailClient(
                 base_url=config.basic.duckmail_base_url,
-                proxy=config.basic.proxy,
+                proxy=mail_proxy,
                 verify_ssl=config.basic.duckmail_verify_ssl,
                 api_key=config.basic.duckmail_api_key,
                 log_callback=log_cb,
@@ -152,35 +161,59 @@ class LoginService(BaseTaskService[LoginTask]):
         else:
             return {"success": False, "email": account_id, "error": f"unsupported mail provider: {mail_provider}"}
 
-        # 根据配置选择浏览器引擎
-        browser_engine = (config.basic.browser_engine or "dp").lower()
-        headless = config.basic.browser_headless
+        # 自动化刷新：若启用节点池，则按“预检->失败扣分->换节点重试”策略跑到成功或节点池耗尽。
+        while True:
+            automation_proxy = (config.basic.proxy or "").strip()
+            if pool:
+                try:
+                    pool.ensure_proxy_reachable()
+                    automation_proxy = pool.proxy_server
+                except Exception as exc:
+                    return {"success": False, "email": account_id, "error": f"proxy pool unavailable: {type(exc).__name__}: {exc}"}
 
-        if browser_engine == "dp":
-            # DrissionPage 引擎：支持有头和无头模式
-            automation = GeminiAutomation(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy,
-                headless=headless,
-                log_callback=log_cb,
-            )
-        else:
-            # undetected-chromedriver 引擎：无头模式反检测能力弱，强制使用有头模式
-            if headless:
-                log_cb("warning", "UC engine: headless mode not recommended, forcing headed mode")
-                headless = False
-            automation = GeminiAutomationUC(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy,
-                headless=headless,
-                log_callback=log_cb,
-            )
-        try:
-            result = automation.login_and_extract(account_id, client)
-        except Exception as exc:
-            return {"success": False, "email": account_id, "error": str(exc)}
+            # 根据配置选择浏览器引擎
+            browser_engine = (config.basic.browser_engine or "dp").lower()
+            headless = config.basic.browser_headless
+
+            if browser_engine == "dp":
+                automation = GeminiAutomation(
+                    user_agent=self.user_agent,
+                    proxy=automation_proxy,
+                    headless=headless,
+                    log_callback=log_cb,
+                )
+            else:
+                if headless:
+                    log_cb("warning", "UC engine: headless mode not recommended, forcing headed mode")
+                    headless = False
+                automation = GeminiAutomationUC(
+                    user_agent=self.user_agent,
+                    proxy=automation_proxy,
+                    headless=headless,
+                    log_callback=log_cb,
+                )
+
+            try:
+                result = automation.login_and_extract(account_id, client)
+            except Exception as exc:
+                result = {"success": False, "error": str(exc)}
+
+            if result.get("success"):
+                break
+
+            err = str(result.get("error") or "automation failed")
+            if not pool:
+                return {"success": False, "email": account_id, "error": err}
+
+            kind, detail = classify_failure(err)
+            log_cb("warning", f"automation failed kind={kind}, detail={detail}; switching node")
+            try:
+                pool.on_failure(kind=kind, detail=detail)
+            except Exception as exc:
+                return {"success": False, "email": account_id, "error": f"proxy pool exhausted: {type(exc).__name__}: {exc}"}
+
         if not result.get("success"):
-            return {"success": False, "email": account_id, "error": result.get("error", "automation failed")}
+            return {"success": False, "email": account_id, "error": str(result.get('error') or 'automation failed')}
 
         # 更新账户配置
         config_data = result["config"]
