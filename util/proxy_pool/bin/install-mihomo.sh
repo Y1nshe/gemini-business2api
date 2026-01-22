@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$ROOT_DIR/bin"
+DEST_BIN="${MIHOMO_BIN:-$BIN_DIR/mihomo}"
+DEST_DIR="$(dirname -- "$DEST_BIN")"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -68,20 +70,19 @@ PY
 )"
 
 echo "Download: $asset_url"
-mkdir -p "$BIN_DIR"
+mkdir -p "$DEST_DIR"
 
 tmp_gz="$(mktemp)"
 trap 'rm -f "$tmp_gz"' EXIT
 curl -L --fail "$asset_url" -o "$tmp_gz"
 
-if [ -f "$BIN_DIR/mihomo" ]; then
-  mv -f "$BIN_DIR/mihomo" "$BIN_DIR/mihomo.bak"
+if [ -f "$DEST_BIN" ]; then
+  mv -f "$DEST_BIN" "$DEST_BIN.bak"
 fi
 
-gunzip -c "$tmp_gz" > "$BIN_DIR/mihomo"
-chmod +x "$BIN_DIR/mihomo"
+gunzip -c "$tmp_gz" > "$DEST_BIN"
+chmod +x "$DEST_BIN"
 
-echo "OK: $BIN_DIR/mihomo"
+echo "OK: $DEST_BIN"
 echo "Version:"
-"$BIN_DIR/mihomo" -v | head -n 1
-
+"$DEST_BIN" -v | head -n 1

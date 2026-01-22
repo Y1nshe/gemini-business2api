@@ -111,6 +111,13 @@ class RegisterService(BaseTaskService[RegisterTask]):
         log_cb = lambda level, message: self._append_log(task, level, message)
         pool = self.proxy_pool if (self.proxy_pool and self.proxy_pool.s.enabled) else None
 
+        # 先确保节点池可用，避免“代理不可用但已经消耗了邮箱/触发了注册”的浪费。
+        if pool:
+            try:
+                pool.ensure_proxy_reachable()
+            except Exception as exc:
+                return {"success": False, "error": f"proxy pool unavailable: {type(exc).__name__}: {exc}"}
+
         # 邮件服务建议直连；若用户显式配置了 proxy，则继续使用。
         duckmail_proxy = (config.basic.proxy or "").strip()
         if pool and duckmail_proxy == pool.proxy_server:

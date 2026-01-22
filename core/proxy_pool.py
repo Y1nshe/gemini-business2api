@@ -202,7 +202,10 @@ class ProxyPool:
         return self._tool_root() / "cgpool.py"
 
     def _mihomo_bin(self) -> Path:
-        return self._tool_root() / "bin" / "mihomo"
+        # NOTE:
+        # - Container often runs as a non-root user (see docker-compose `user:`), so /app/util is read-only.
+        # - Put runtime-downloaded binaries under the persistent data dir, so it's writable and survives restarts.
+        return self.root_dir / "bin" / "mihomo"
 
     def _mihomo_install_script(self) -> Path:
         return self._tool_root() / "bin" / "install-mihomo.sh"
@@ -393,7 +396,11 @@ class ProxyPool:
             if not installer.exists():
                 raise RuntimeError(f"mihomo not found and install script missing: {installer}")
             logger.info("[PROXY_POOL] mihomo missing, installing via %s", installer)
-            subprocess.run(["bash", str(installer)], check=True)
+            mihomo.parent.mkdir(parents=True, exist_ok=True)
+            env = dict(os.environ)
+            # Let the installer write the binary into a writable path.
+            env["MIHOMO_BIN"] = str(mihomo)
+            subprocess.run(["bash", str(installer)], check=True, env=env)
 
         cfg_src = self._mihomo_cfg_template()
         cfg_dst = self.root_dir / "mihomo.yaml"
@@ -595,4 +602,3 @@ class ProxyPool:
 
         # 重新选择并做 preflight（不在同一把锁内，避免长时间占用）
         self.ensure_proxy_reachable()
-
