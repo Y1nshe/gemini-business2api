@@ -305,7 +305,10 @@ def get_base_url(request: Request) -> str:
     forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host"))
 
-    return f"{forwarded_proto}://{forwarded_host}"
+    # If the app is mounted under a path prefix, include it in the public base URL.
+    root_path = str(request.scope.get("root_path") or "").rstrip("/")
+    base = f"{forwarded_proto}://{forwarded_host}"
+    return f"{base}{root_path}" if root_path else base
 
 
 
