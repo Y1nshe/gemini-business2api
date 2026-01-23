@@ -117,7 +117,7 @@ jobs:
           PY
 
           curl -fsS \
-            -H "Authorization: token ${{ secrets.GITEA_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.GITEA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @/tmp/tag.json \
@@ -142,9 +142,8 @@ jobs:
           PY
 
           curl -fsS \
-            -H "Authorization: token ${{ secrets.GITEA_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.GITEA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @/tmp/release.json \
             "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/releases"
-
