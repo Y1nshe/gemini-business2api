@@ -241,7 +241,8 @@ memory_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(m
 logger.addHandler(memory_handler)
 
 # ---------- 配置管理（使用统一配置系统）----------
-# 所有配置通过 config_manager 访问，优先级：环境变量 > YAML > 默认值
+# 业务配置通过 config_manager 访问，优先级：YAML/DB > 默认值（可热更新）
+# 安全配置（ADMIN_KEY/SESSION_SECRET_KEY）仅从环境变量读取（不可热更新）
 TIMEOUT_SECONDS = 600
 API_KEY = config.basic.api_key
 ADMIN_KEY = config.security.admin_key
@@ -249,6 +250,11 @@ PROXY = config.basic.proxy
 BASE_URL = config.basic.base_url
 SESSION_SECRET_KEY = config.security.session_secret_key
 SESSION_EXPIRE_HOURS = config.session.expire_hours
+
+# ---------- 部署相关配置（仅环境变量，重启生效） ----------
+# 将应用整体挂载到单一路径前缀下（例如 /<PATH_PREFIX>/* ）
+# 典型用途：配合 Nginx 只放行前缀路径，降低暴露面。
+PATH_PREFIX = (os.getenv("PATH_PREFIX", "") or "").strip().strip("/")
 
 # ---------- 公开展示配置 ----------
 LOGO_URL = config.public_display.logo_url
@@ -471,9 +477,16 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET_KEY,
     max_age=SESSION_EXPIRE_HOURS * 3600,  # 转换为秒
+    path=(f"/{PATH_PREFIX}/" if PATH_PREFIX else "/"),
     same_site="lax",
     https_only=False  # 本地开发可设为False，生产环境建议True
 )
+
+# ---------- PATH_PREFIX 中间件（必须放在最后添加，确保最外层先执行） ----------
+if PATH_PREFIX:
+    from core.path_prefix import PathPrefixMiddleware
+
+    app.add_middleware(PathPrefixMiddleware, prefix=PATH_PREFIX)
 
 # ---------- Uptime 追踪中间件 ----------
 @app.middleware("http")
