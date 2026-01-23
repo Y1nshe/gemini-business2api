@@ -20,6 +20,16 @@
 - `PATH_PREFIX`（推荐）：将整个应用挂载到 `/<PATH_PREFIX>/*` 下（WebUI、/admin、/v1、/public 等都会在该前缀下可用）。
   - 典型用途：反代只放行前缀路径，减少暴露面。
   - 访问方式：`https://host/<PATH_PREFIX>/`
+  - 反向代理建议（Nginx 示例，**保留前缀**，由应用内部剥离）：
+    ```nginx
+    location = /<PATH_PREFIX> { return 308 /<PATH_PREFIX>/; }
+    location /<PATH_PREFIX>/ {
+      proxy_pass http://127.0.0.1:7860;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+    ```
 
 可选：
 
@@ -48,4 +58,3 @@
 
 账号的导入、禁用、删除、自动补号等均通过 WebUI 操作。  
 数据默认存放在 `data/accounts.json`，启用数据库后会持久化在数据库中。
-
