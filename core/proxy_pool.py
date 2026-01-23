@@ -4,7 +4,9 @@
 目标：
 1) 通过 Chromego 稳定更新源拉取节点列表；
 2) 使用 mihomo 在本地开启 mixed-port，供浏览器/HTTP 客户端使用；
-3) 通过“静态 base 分 + 动态扣分”的策略在节点间切换，直到 preflight 通过或节点池耗尽。
+3) 通过“静态 base 分 + 动态扣分”的策略在节点间切换，直到 preflight 通过或节点池耗尽；
+4) 选择时优先使用 mihomo health-check 判定为 alive 的节点，避免大量不可达节点导致的无意义切换；
+5) 在当前节点仍可用（preflight 通过）时尽量保持节点稳定，减少不必要的换 IP 带来的额外风控概率。
 
 说明（默认参数，已基于实验拟合选定）：
 - score_threshold = 10
@@ -81,9 +83,9 @@ LINE_W = {
     "机房": -1.534,
 }
 RISK_W = {
-    "高风险": 1.552,
+    "高风险": -1.281,
     "低风险": 0.831,
-    "非常安全": -1.281,
+    "非常安全": 1.552,
 }
 
 
@@ -480,7 +482,15 @@ class ProxyPool:
             raise RuntimeError("unexpected /proxies response")
         return obj
 
-    def _get_group(self) -> Tuple[Optional[str], List[str]]:
+    def _get_group(self) -> Tuple[Optional[str], List[str], Dict[str, Optional[bool]]]:
+        """读取当前 select group 状态，并返回候选节点列表及 alive 信息
+
+        Returns:
+            (now, candidates, alive_map)
+            - now: 当前选中的节点名（可能为 None）
+            - candidates: group 中的候选节点名（过滤 DIRECT/REJECT）
+            - alive_map: name -> alive (True/False/None)。None 表示缺失或未知。
+        """
         proxies_json = self._get_proxies()
         proxies = proxies_json.get("proxies", {})
         if not isinstance(proxies, dict):
@@ -495,12 +505,31 @@ class ProxyPool:
         if not isinstance(all_list, list) or not all(isinstance(x, str) for x in all_list):
             raise RuntimeError(f"unexpected group format for {GROUP_NAME}: missing all[]")
         candidates = [n for n in all_list if n not in {"DIRECT", "REJECT"}]
-        return now, candidates
+        alive_map: Dict[str, Optional[bool]] = {}
+        for n in candidates:
+            alive: Optional[bool] = None
+            obj = proxies.get(n)
+            if isinstance(obj, dict):
+                v = obj.get("alive")
+                if v is True or v is False:
+                    alive = bool(v)
+            alive_map[n] = alive
+        return now, candidates, alive_map
 
     def _select_group(self, name: str) -> None:
         url = self.controller_base.rstrip("/") + f"/proxies/{requests.utils.quote(GROUP_NAME, safe='')}"
         r = requests.put(url, headers=self._headers(), json={"name": name}, timeout=5)
         r.raise_for_status()
+
+    def _preflight(self) -> Tuple[bool, List[str]]:
+        """通过当前已选节点探测预检 URL 列表是否可达"""
+        details: List[str] = []
+        for u in PREFLIGHT_URLS:
+            ok, detail = self._probe_once(u)
+            details.append(detail)
+            if not ok:
+                return False, details
+        return True, details
 
     def _probe_once(self, url: str) -> Tuple[bool, str]:
         proxies = {"http": self.proxy_server, "https": self.proxy_server}
@@ -547,16 +576,37 @@ class ProxyPool:
             self._maybe_refresh_dynamic()
 
             switches = 0
-            last_selected: Optional[str] = None
             while True:
-                now, candidates = self._get_group()
+                now, candidates, alive_map = self._get_group()
                 if not candidates:
                     raise RuntimeError("no proxy candidates in group")
 
                 for n in candidates:
                     self._dyn_penalty.setdefault(n, 0.0)
 
-                best = max(candidates, key=lambda n: (self._score(n), n))
+                # Drop nodes that mihomo already marks as dead, but keep a fallback path
+                # when everything is unknown/false (e.g., just booted and health-check not ready yet).
+                usable = [n for n in candidates if alive_map.get(n) is not False]
+                if usable:
+                    candidates = usable
+
+                def _alive_rank(v: Optional[bool]) -> int:
+                    # Prefer alive=True over unknown, and both over alive=False (filtered out above).
+                    if v is True:
+                        return 2
+                    return 1
+
+                # Sticky behavior: if current node is still healthy (preflight ok),
+                # keep it to reduce unnecessary IP churn.
+                if now and now in candidates and self._score(now) >= float(SCORE_THRESHOLD):
+                    ok, details = self._preflight()
+                    if ok:
+                        return
+                    logger.warning("[PROXY_POOL] preflight failed: %s", " | ".join(details))
+                    self._apply_penalty(now, kind="preflight", detail=details[0] if details else "")
+                    time.sleep(0.2)
+
+                best = max(candidates, key=lambda n: (_alive_rank(alive_map.get(n)), self._score(n), n))
                 best_score = self._score(best)
                 if best_score < float(SCORE_THRESHOLD):
                     raise RuntimeError(f"proxy pool exhausted: best_score={best_score:.1f} < threshold={SCORE_THRESHOLD:g}")
@@ -582,28 +632,18 @@ class ProxyPool:
                         )
                     self._last_switch_ts = time.monotonic()
                     switches += 1
-                    last_selected = best
                     time.sleep(0.2)
-                else:
-                    last_selected = now
+                    now = best
 
-                all_ok = True
-                details: List[str] = []
-                for u in PREFLIGHT_URLS:
-                    ok, detail = self._probe_once(u)
-                    details.append(detail)
-                    if not ok:
-                        all_ok = False
-                        break
-
-                if all_ok:
+                ok, details = self._preflight()
+                if ok:
                     if switches > 0:
                         logger.info("[PROXY_POOL] preflight ok after %s switch(es)", switches)
                     return
 
                 logger.warning("[PROXY_POOL] preflight failed: %s", " | ".join(details))
-                if last_selected:
-                    self._apply_penalty(last_selected, kind="preflight", detail=details[0] if details else "")
+                if now:
+                    self._apply_penalty(now, kind="preflight", detail=details[0] if details else "")
                 time.sleep(0.2)
 
     def on_failure(self, kind: str, detail: str) -> None:
@@ -613,7 +653,7 @@ class ProxyPool:
         self.ensure_started()
 
         with self._lock:
-            now, _ = self._get_group()
+            now, _, _ = self._get_group()
             if not now:
                 self.ensure_proxy_reachable()
                 return
