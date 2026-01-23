@@ -1,0 +1,150 @@
+name: Release + Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version + release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          # Find the latest SemVer tag (vX.Y.Z).
+          last_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)"
+
+          if [ -z "${last_tag}" ]; then
+            base="0.0.0"
+            range="HEAD"
+          else
+            base="${last_tag#v}"
+            range="${last_tag}..HEAD"
+          fi
+
+          IFS='.' read -r major minor patch <<< "${base}"
+
+          # Default bump: patch
+          bump="patch"
+          msgs="$(git log --no-merges --pretty=format:%s ${range} || true)"
+
+          # Conventional Commits (best-effort):
+          # - BREAKING CHANGE / "type!:" => major
+          # - feat: => minor
+          if echo "${msgs}" | grep -Eq 'BREAKING CHANGE|^[a-zA-Z]+\\(.+\\)!:' || echo "${msgs}" | grep -Eq '^[a-zA-Z]+!:'; then
+            bump="major"
+          elif echo "${msgs}" | grep -Eq '^feat(\\(.+\\))?:'; then
+            bump="minor"
+          fi
+
+          case "${bump}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+
+          version="${major}.${minor}.${patch}"
+          tag="v${version}"
+
+          notes="$(git log --no-merges --pretty=format:'- %s (%h)' ${range} || true)"
+          if [ -z "${notes}" ]; then
+            notes="- (no commits)"
+          fi
+
+          {
+            echo "RELEASE_VERSION=${version}"
+            echo "RELEASE_TAG=${tag}"
+            echo "RELEASE_SHA=$(git rev-parse HEAD)"
+            echo "RELEASE_NOTES<<EOF"
+            echo "${notes}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+      - name: Login to Docker Hub
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Build + push linux/amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker buildx create --use --name gitea-builder || docker buildx use gitea-builder
+          docker buildx inspect --bootstrap
+
+          image="${{ secrets.DOCKERHUB_USERNAME }}/gemini2api"
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${image}:${RELEASE_VERSION}" \
+            -t "${image}:latest" \
+            .
+
+      - name: Create tag (Gitea API)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > /tmp/tag.json
+          import json, os
+          payload = {
+            "tag_name": os.environ["RELEASE_TAG"],
+            "target": os.environ["RELEASE_SHA"],
+          }
+          print(json.dumps(payload))
+          PY
+
+          curl -fsS \
+            -H "Authorization: token ${{ secrets.GITEA_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d @/tmp/tag.json \
+            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/tags"
+
+      - name: Create release (Gitea API)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > /tmp/release.json
+          import json, os
+          payload = {
+            "tag_name": os.environ["RELEASE_TAG"],
+            "target_commitish": "main",
+            "name": os.environ["RELEASE_TAG"],
+            "body": os.environ.get("RELEASE_NOTES", ""),
+            "draft": False,
+            "prerelease": False,
+          }
+          print(json.dumps(payload))
+          PY
+
+          curl -fsS \
+            -H "Authorization: token ${{ secrets.GITEA_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d @/tmp/release.json \
+            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/releases"
+
