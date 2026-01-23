@@ -22,29 +22,38 @@ jobs:
 
           git fetch --tags --force
 
-          # Find the latest SemVer tag (vX.Y.Z).
-          last_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)"
+          # Find the latest SemVer tag (X.Y.Z).
+          last_tag="$(git tag -l '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)"
+
+          base="0.0.0"
+          subjects=""
+          bodies=""
+          notes=""
 
           if [ -z "${last_tag}" ]; then
-            base="0.0.0"
-            range="HEAD"
+            # First release: keep notes bounded.
+            subjects="$(git log --no-merges --pretty=format:%s -n 50 || true)"
+            bodies="$(git log --no-merges --pretty=format:%B -n 50 || true)"
+            notes="$(git log --no-merges --pretty=format:'- %s (%h)' -n 50 || true)"
           else
-            base="${last_tag#v}"
+            base="${last_tag}"
             range="${last_tag}..HEAD"
+            subjects="$(git log --no-merges --pretty=format:%s ${range} || true)"
+            bodies="$(git log --no-merges --pretty=format:%B ${range} || true)"
+            notes="$(git log --no-merges --pretty=format:'- %s (%h)' ${range} || true)"
           fi
 
           IFS='.' read -r major minor patch <<< "${base}"
 
           # Default bump: patch
           bump="patch"
-          msgs="$(git log --no-merges --pretty=format:%s ${range} || true)"
 
           # Conventional Commits (best-effort):
           # - BREAKING CHANGE / "type!:" => major
           # - feat: => minor
-          if echo "${msgs}" | grep -Eq 'BREAKING CHANGE|^[a-zA-Z]+\\(.+\\)!:' || echo "${msgs}" | grep -Eq '^[a-zA-Z]+!:'; then
+          if echo "${bodies}" | grep -Eq 'BREAKING CHANGE' || echo "${subjects}" | grep -Eq '^[a-zA-Z]+(\(.+\))?!:' || echo "${subjects}" | grep -Eq '^[a-zA-Z]+!:'; then
             bump="major"
-          elif echo "${msgs}" | grep -Eq '^feat(\\(.+\\))?:'; then
+          elif echo "${subjects}" | grep -Eq '^feat(\(.+\))?:'; then
             bump="minor"
           fi
 
@@ -64,9 +73,8 @@ jobs:
           esac
 
           version="${major}.${minor}.${patch}"
-          tag="v${version}"
+          tag="${version}"
 
-          notes="$(git log --no-merges --pretty=format:'- %s (%h)' ${range} || true)"
           if [ -z "${notes}" ]; then
             notes="- (no commits)"
           fi
@@ -117,7 +125,7 @@ jobs:
           PY
 
           curl -fsS \
-            -H "Authorization: token ${{ secrets.GITEA_API_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @/tmp/tag.json \
@@ -142,7 +150,7 @@ jobs:
           PY
 
           curl -fsS \
-            -H "Authorization: token ${{ secrets.GITEA_API_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @/tmp/release.json \
