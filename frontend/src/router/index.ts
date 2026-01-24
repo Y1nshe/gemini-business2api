@@ -1,8 +1,15 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '@/stores'
 
+function getRuntimeBase(): string {
+  // When deployed under a path prefix (e.g. https://host/<prefix>/),
+  // window.location.pathname is "/<prefix>/".
+  const pathname = window.location.pathname || '/'
+  return pathname.endsWith('/') ? pathname : `${pathname}/`
+}
+
 const router = createRouter({
-  history: createWebHashHistory(import.meta.env.BASE_URL),
+  history: createWebHashHistory(getRuntimeBase()),
   routes: [
     {
       path: '/public/uptime',

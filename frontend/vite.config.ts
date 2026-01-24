@@ -4,6 +4,9 @@ import path from 'path'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Use relative asset paths so the UI can be served under an arbitrary path prefix.
+  // Example: https://host/<PATH_PREFIX>/ -> assets + API requests stay under the prefix.
+  base: './',
   plugins: [vue()],
   resolve: {
     alias: {

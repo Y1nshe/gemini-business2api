@@ -3,6 +3,6 @@ import type { PublicDisplay } from '@/types/api'
 
 export const publicDisplayApi = {
   overview() {
-    return apiClient.get<PublicDisplay>('/public/display')
+    return apiClient.get<PublicDisplay>('public/display')
   },
 }

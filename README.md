@@ -60,6 +60,10 @@
 
 ## 🚀 快速开始
 
+## ⚙️ 配置说明
+
+推荐配置方案见：`docs/CONFIG.md`（环境变量 / 系统设置 / 账号池）。
+
 ### 方式一：Zeabur 部署（推荐，支持自动更新）
 
 大佬对Linux和Docker的部署优化 [感谢PR](https://github.com/Dreamy-rain/gemini-business2api/pull/37)
@@ -201,6 +205,7 @@ cd gemini-business2api
 # 2. 配置环境变量
 cp .env.example .env
 # 编辑 .env 设置 ADMIN_KEY
+# 可选：SESSION_SECRET_KEY、PATH_PREFIX（推荐）、DATABASE_URL
 
 # 3. 启动服务
 docker-compose up -d

@@ -3,6 +3,7 @@ Session认证模块
 提供基于Session的登录认证功能
 """
 import secrets
+import os
 from functools import wraps
 from typing import Optional
 from fastapi import HTTPException, Request, Response
@@ -46,18 +47,15 @@ def require_login(redirect_to_login: bool = True):
                     wants_html = "text/html" in accept_header or request.url.path.endswith("/html")
 
                     if wants_html:
-                        # 清理掉 URL 中可能重复的 PATH_PREFIX
-                        # 避免重定向路径出现多层前缀
-                        path = request.url.path
+                        # For SPA deployments (Vue hash router), redirect to the frontend login route.
+                        # Prefer ASGI scope root_path (supports reverse proxies), then fall back to env.
+                        root_path = str(request.scope.get("root_path") or "")
+                        if not root_path:
+                            prefix = (os.getenv("PATH_PREFIX") or "").strip().strip("/")
+                            if prefix:
+                                root_path = f"/{prefix}"
 
-                        # 兼容 main 中 PATH_PREFIX 为空的情况
-                        import main
-                        prefix = main.PATH_PREFIX
-
-                        if prefix:
-                            login_url = f"/{prefix}/login"
-                        else:
-                            login_url = "/login"
+                        login_url = f"{root_path}/#/login" if root_path else "/#/login"
 
                         return RedirectResponse(url=login_url, status_code=302)
 

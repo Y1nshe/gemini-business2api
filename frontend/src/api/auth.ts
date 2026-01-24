@@ -5,7 +5,7 @@ export const authApi = {
   login: (data: LoginRequest) => {
     const payload = new URLSearchParams()
     payload.append('admin_key', data.password)
-    return apiClient.post<URLSearchParams, LoginResponse>('/login', payload, {
+    return apiClient.post<URLSearchParams, LoginResponse>('login', payload, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
@@ -13,8 +13,8 @@ export const authApi = {
   },
 
   logout: () =>
-    apiClient.post('/logout'),
+    apiClient.post('logout'),
 
   checkAuth: () =>
-    apiClient.get('/admin/health'),
+    apiClient.get('admin/health'),
 }

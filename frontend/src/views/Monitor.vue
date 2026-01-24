@@ -10,7 +10,7 @@
         </div>
         <div class="flex items-center gap-2">
           <a
-            href="/#/public/uptime"
+            :href="publicUptimeHref"
             target="_blank"
             class="rounded-full border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors
                    hover:border-primary hover:text-primary"
@@ -61,10 +61,16 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useUptimeStatus } from '@/composables/useUptimeStatus'
 
 const { services, updatedAt, errorMessage, refreshStatus } = useUptimeStatus()
+
+const publicUptimeHref = computed(() => {
+  const pathname = window.location.pathname || '/'
+  const base = pathname.endsWith('/') ? pathname : `${pathname}/`
+  return `${base}#/public/uptime`
+})
 
 onMounted(() => {
   refreshStatus()
