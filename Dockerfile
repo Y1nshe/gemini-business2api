@@ -47,6 +47,10 @@ COPY util ./util
 # 从 builder 阶段只复制构建好的静态文件
 COPY --from=frontend-builder /app/static ./static
 
+# 运行时配置注入（PATH_PREFIX 等）需要在容器启动时写入该文件。
+# 容器通常以非 root 用户运行，因此这里确保该文件可写。
+RUN touch ./static/runtime-config.js && chmod 666 ./static/runtime-config.js
+
 # 创建数据目录
 RUN mkdir -p ./data
 

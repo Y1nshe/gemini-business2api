@@ -1,8 +1,31 @@
 ﻿import axios, { type AxiosInstance, type AxiosError } from 'axios'
 
+declare global {
+  interface Window {
+    __G2API_CONFIG__?: {
+      // Path prefix where the app is mounted, e.g. "/gemini2api". Empty means "/".
+      basePath?: string
+      // Base URL for API calls. Defaults to basePath if omitted.
+      apiBase?: string
+    }
+  }
+}
+
+function normalizeBaseUrl(url: string): string {
+  // Keep it simple: allow "", "/x", "/x/y", "https://host/x".
+  // Remove trailing slashes to make axios URL joining consistent.
+  return String(url || '').replace(/\/+$/, '')
+}
+
+const runtimeApiBase =
+  window.__G2API_CONFIG__?.apiBase ??
+  window.__G2API_CONFIG__?.basePath ??
+  ''
+
 // 创建 axios 实例
 export const apiClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '',
+  // Runtime config > build-time config.
+  baseURL: normalizeBaseUrl(runtimeApiBase || import.meta.env.VITE_API_URL || ''),
   timeout: 30000,
   withCredentials: true, // 支持 cookie 认证
 })
