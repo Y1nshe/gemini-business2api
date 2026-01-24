@@ -284,13 +284,54 @@ class ProxyPool:
             return False
         return True
 
+    def _is_pid_mihomo(self, pid: int) -> bool:
+        """判断某个 PID 是否确实是 mihomo 进程。
+
+        仅用 `kill(pid, 0)` 会误判：容器重启后 PID 可能被其它进程复用，导致我们认为
+        mihomo 已经启动，从而跳过启动步骤，最终 controller(9090) 连接被拒绝。
+
+        Returns:
+            True: 该 PID 对应的进程看起来就是 mihomo。
+            False: PID 存在但不是 mihomo（或无法确认）。
+        """
+        # Linux container only. Best-effort: any error -> treat as not mihomo.
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+            if os.path.basename(exe) == "mihomo":
+                return True
+        except Exception:
+            pass
+
+        try:
+            cmdline_path = Path(f"/proc/{pid}/cmdline")
+            raw = cmdline_path.read_text(encoding="utf-8", errors="replace")
+            cmdline = raw.replace("\x00", " ").strip()
+            if "mihomo" in cmdline:
+                return True
+        except Exception:
+            pass
+
+        return False
+
     def _is_mihomo_running(self) -> bool:
         try:
             pid_s = self._pid_file().read_text(encoding="utf-8").strip()
             pid = int(pid_s)
         except Exception:
             return False
-        return self._is_running_pid(pid)
+        if not self._is_running_pid(pid):
+            return False
+
+        # 防止 pid file 复用/误判：仅当 PID 的可执行文件/命令行确认为 mihomo 时才认为“已运行”。
+        if not self._is_pid_mihomo(pid):
+            try:
+                self._pid_file().unlink()
+            except Exception:
+                pass
+            logger.warning("[PROXY_POOL] stale mihomo pid file detected; pid=%s", pid)
+            return False
+
+        return True
 
     def _ensure_dirs(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
