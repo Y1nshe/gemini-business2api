@@ -120,6 +120,30 @@
                 <Checkbox v-model="localSettings.basic.pool_prune_disabled">
                   自动删除已禁用账号
                 </Checkbox>
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>内置代理节点池（Chromego）</span>
+                  <HelpTip text="启用后，自动注册/刷新会通过节点池选择可用代理；失败会按原因扣分并换节点重试。" />
+                </div>
+                <div class="grid grid-cols-2 items-center gap-x-6 gap-y-2">
+                  <Checkbox v-model="localSettings.basic.proxy_pool_enabled">
+                    启用节点池
+                  </Checkbox>
+                  <div class="flex items-center justify-end gap-2">
+                    <Checkbox v-model="localSettings.basic.proxy_pool_required">
+                      初始化失败即中止
+                    </Checkbox>
+                    <HelpTip text="开启后：节点池初始化/预检失败将直接中止注册/刷新。关闭后：将降级为不使用节点池。" />
+                  </div>
+                </div>
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>节点源选择（0=合并 1..6）</span>
+                  <HelpTip text="Chromego stable update 源编号。0 表示合并全部源并去重，节点最多但抓取更慢。" />
+                </div>
+                <SelectMenu
+                  v-model="localSettings.basic.proxy_pool_chromego_ip"
+                  :options="chromegoIpOptions"
+                  class="w-full"
+                />
                 <label class="block text-xs text-muted-foreground">DuckMail API 密钥</label>
                 <input
                   v-model="localSettings.basic.duckmail_api_key"
@@ -267,6 +291,15 @@ const browserEngineOptions = [
   { label: 'UC - 支持无头/有头', value: 'uc' },
   { label: 'DP - 支持无头/有头（推荐）', value: 'dp' },
 ]
+const chromegoIpOptions = [
+  { label: '0 - 合并 1..6（推荐）', value: 0 },
+  { label: '1', value: 1 },
+  { label: '2', value: 2 },
+  { label: '3', value: 3 },
+  { label: '4', value: 4 },
+  { label: '5', value: 5 },
+  { label: '6', value: 6 },
+]
 const imageOutputOptions = [
   { label: 'Base64 编码', value: 'base64' },
   { label: 'URL 链接', value: 'url' },
@@ -309,6 +342,11 @@ watch(settings, (value) => {
   next.basic.register_domain = typeof next.basic.register_domain === 'string'
     ? next.basic.register_domain
     : ''
+  next.basic.proxy_pool_enabled = next.basic.proxy_pool_enabled ?? false
+  next.basic.proxy_pool_required = next.basic.proxy_pool_required ?? true
+  next.basic.proxy_pool_chromego_ip = Number.isFinite(next.basic.proxy_pool_chromego_ip)
+    ? next.basic.proxy_pool_chromego_ip
+    : 0
   next.basic.duckmail_api_key = typeof next.basic.duckmail_api_key === 'string'
     ? next.basic.duckmail_api_key
     : ''

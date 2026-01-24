@@ -326,6 +326,7 @@ multi_account_mgr = load_multi_account_config(
 register_service = None
 login_service = None
 pool_service = None
+proxy_pool = None
 
 def _set_multi_account_mgr(new_mgr):
     global multi_account_mgr
@@ -344,6 +345,13 @@ try:
     from core.register_service import RegisterService
     from core.login_service import LoginService
     from core.pool_service import PoolService
+    from core.proxy_pool import ProxyPool
+
+    try:
+        proxy_pool = ProxyPool.from_config()
+    except Exception as e:
+        logger.warning("[SYSTEM] 节点池初始化失败（将禁用）: %s", e)
+        proxy_pool = None
     register_service = RegisterService(
         multi_account_mgr,
         http_client,
@@ -353,6 +361,7 @@ try:
         SESSION_CACHE_TTL_SECONDS,
         _get_global_stats,
         _set_multi_account_mgr,
+        proxy_pool=proxy_pool,
     )
     login_service = LoginService(
         multi_account_mgr,
@@ -363,6 +372,7 @@ try:
         SESSION_CACHE_TTL_SECONDS,
         _get_global_stats,
         _set_multi_account_mgr,
+        proxy_pool=proxy_pool,
     )
     pool_service = PoolService(
         multi_account_mgr,
@@ -380,6 +390,7 @@ except Exception as e:
     register_service = None
     login_service = None
     pool_service = None
+    proxy_pool = None
 
 # 验证必需的环境变量
 if not ADMIN_KEY:
@@ -425,11 +436,15 @@ elif frontend_origin:
         allow_headers=["*"],
     )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-if os.path.exists(os.path.join("static", "assets")):
-    app.mount("/assets", StaticFiles(directory=os.path.join("static", "assets")), name="assets")
-if os.path.exists(os.path.join("static", "vendor")):
-    app.mount("/vendor", StaticFiles(directory=os.path.join("static", "vendor")), name="vendor")
+static_dir = "static"
+if os.path.isdir(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    if os.path.exists(os.path.join(static_dir, "assets")):
+        app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+    if os.path.exists(os.path.join(static_dir, "vendor")):
+        app.mount("/vendor", StaticFiles(directory=os.path.join(static_dir, "vendor")), name="vendor")
+else:
+    logger.warning("[SYSTEM] static directory missing, Web UI disabled (hint: cd frontend && npm ci && npm run build)")
 
 @app.get("/")
 async def serve_frontend_index():
@@ -1214,6 +1229,9 @@ async def admin_get_settings(request: Request):
             "register_domain": config.basic.register_domain,
             "pool_target_accounts": config.basic.pool_target_accounts,
             "pool_prune_disabled": config.basic.pool_prune_disabled,
+            "proxy_pool_enabled": getattr(config.basic, "proxy_pool_enabled", False),
+            "proxy_pool_required": getattr(config.basic, "proxy_pool_required", True),
+            "proxy_pool_chromego_ip": getattr(config.basic, "proxy_pool_chromego_ip", 0),
         },
         "image_generation": {
             "enabled": config.image_generation.enabled,
@@ -1247,6 +1265,7 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
     global MAX_NEW_SESSION_TRIES, MAX_REQUEST_RETRIES, MAX_ACCOUNT_SWITCH_TRIES
     global ACCOUNT_FAILURE_THRESHOLD, RATE_LIMIT_COOLDOWN_SECONDS, SESSION_CACHE_TTL_SECONDS, AUTO_REFRESH_ACCOUNTS_SECONDS
     global SESSION_EXPIRE_HOURS, multi_account_mgr, http_client
+    global proxy_pool, register_service, login_service
 
     try:
         basic = dict(new_settings.get("basic") or {})
@@ -1260,8 +1279,18 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         basic.setdefault("register_domain", config.basic.register_domain)
         basic.setdefault("pool_target_accounts", config.basic.pool_target_accounts)
         basic.setdefault("pool_prune_disabled", config.basic.pool_prune_disabled)
+        basic.setdefault("proxy_pool_enabled", getattr(config.basic, "proxy_pool_enabled", False))
+        basic.setdefault("proxy_pool_required", getattr(config.basic, "proxy_pool_required", True))
+        basic.setdefault("proxy_pool_chromego_ip", getattr(config.basic, "proxy_pool_chromego_ip", 0))
         if not isinstance(basic.get("register_domain"), str):
             basic["register_domain"] = ""
+        try:
+            ip = int(basic.get("proxy_pool_chromego_ip") or 0)
+        except Exception:
+            ip = 0
+        if ip < 0 or ip > 6:
+            ip = 0
+        basic["proxy_pool_chromego_ip"] = ip
         basic.pop("duckmail_proxy", None)
         # 兼容旧配置：丢弃已移除的账号池字段（旧 WebUI/YAML 可能仍上传这些字段）。
         basic.pop("pool_check_interval_seconds", None)
@@ -1293,6 +1322,19 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
 
         # 热更新配置
         config_manager.reload()
+
+        # 节点池配置属于 YAML 业务配置：保存后应立即生效（更新 service 引用即可）。
+        try:
+            from core.proxy_pool import ProxyPool
+
+            proxy_pool = ProxyPool.from_config()
+        except Exception as e:
+            logger.warning("[SYSTEM] 节点池初始化失败（将禁用）: %s", e)
+            proxy_pool = None
+        if register_service:
+            register_service.proxy_pool = proxy_pool
+        if login_service:
+            login_service.proxy_pool = proxy_pool
 
         # 更新全局变量（实时生效）
         API_KEY = config.basic.api_key
@@ -1548,6 +1590,14 @@ async def chat_impl(
             # 新对话：轮询选择可用账户，失败时尝试其他账户
             max_account_tries = min(MAX_NEW_SESSION_TRIES, len(multi_account_mgr.accounts))
             last_error = None
+
+            # 没有任何账号时，直接返回 503（避免后续使用未初始化的 account_manager 导致 500）。
+            if max_account_tries <= 0:
+                logger.error(f"[CHAT] [req_{request_id}] 没有可用账户（account pool empty）")
+                uptime_tracker.record_request("account_pool", False, status_code=503)
+                status = classify_error_status(503, Exception("account_pool_empty"))
+                await finalize_result(status, 503, "No accounts configured")
+                raise HTTPException(503, "No accounts configured. Please add accounts in admin panel.")
 
             for attempt in range(max_account_tries):
                 try:

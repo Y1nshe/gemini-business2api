@@ -1,0 +1,33 @@
+# Minimal "pool entrance" config for mihomo/Clash Meta.
+# - Nodes come from a generated provider file: ./providers/chromego.yaml
+# - All traffic goes through POOL_ACTIVE, which is switched by the built-in pool logic.
+
+mixed-port: 7893
+mode: Rule
+log-level: info
+allow-lan: false
+
+external-controller: 127.0.0.1:9090
+secret: ""
+
+# Enable IPv6 support (effective only if your host/network has IPv6 connectivity).
+ipv6: true
+
+proxy-providers:
+  chromego:
+    type: file
+    path: ./providers/chromego.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+proxy-groups:
+  - name: POOL_ACTIVE
+    type: select
+    use:
+      - chromego
+
+rules:
+  - MATCH,POOL_ACTIVE
+

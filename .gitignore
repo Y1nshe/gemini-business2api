@@ -41,6 +41,10 @@ data/
 logs/
 static/
 
+# Proxy pool runtime artifacts
+util/proxy_pool/bin/mihomo*
+util/proxy_pool/state/
+
 # OS
 .DS_Store
 Thumbs.db
