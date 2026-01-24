@@ -1,10 +1,18 @@
 name: Release + Docker Hub
 
 on:
+  # Manual release strategy:
+  # - Push a SemVer tag (X.Y.Z) to trigger a release build + Docker image push.
+  # - main branch changes alone will NOT create releases.
   push:
-    branches:
-      - main
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (SemVer: X.Y.Z). Leave empty to use the current ref."
+        required: false
+        type: string
 
 jobs:
   release:
@@ -15,72 +23,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute version + release notes
+      - name: Resolve release tag + notes
         shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
           git fetch --tags --force
 
-          # Find the latest SemVer tag (X.Y.Z).
-          last_tag="$(git tag -l '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)"
+          tag="${TAG_INPUT:-${GITHUB_REF_NAME:-}}"
+          if [ -z "${tag}" ]; then
+            echo "ERROR: missing release tag (push a tag like 1.2.3 or provide inputs.tag)" >&2
+            exit 1
+          fi
 
-          base="0.0.0"
-          subjects=""
-          bodies=""
-          notes=""
+          if ! echo "${tag}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: invalid tag '${tag}', expected SemVer X.Y.Z" >&2
+            exit 1
+          fi
 
-          if [ -z "${last_tag}" ]; then
+          # Ensure the build uses the tag's exact commit (workflow_dispatch defaults to main HEAD).
+          git checkout -f "${tag}"
+
+          # Prefer the previous reachable SemVer tag, so notes follow history even if tags are out of order.
+          prev_tag="$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' "${tag}^" 2>/dev/null || true)"
+
+          if [ -z "${prev_tag}" ]; then
             # First release: keep notes bounded.
-            subjects="$(git log --no-merges --pretty=format:%s -n 50 || true)"
-            bodies="$(git log --no-merges --pretty=format:%B -n 50 || true)"
-            notes="$(git log --no-merges --pretty=format:'- %s (%h)' -n 50 || true)"
+            notes="$(git log --first-parent --pretty=format:'- %s (%h)' -n 50 || true)"
           else
-            base="${last_tag}"
-            range="${last_tag}..HEAD"
-            subjects="$(git log --no-merges --pretty=format:%s ${range} || true)"
-            bodies="$(git log --no-merges --pretty=format:%B ${range} || true)"
-            notes="$(git log --no-merges --pretty=format:'- %s (%h)' ${range} || true)"
+            notes="$(git log --first-parent --pretty=format:'- %s (%h)' "${prev_tag}..${tag}" || true)"
           fi
-
-          IFS='.' read -r major minor patch <<< "${base}"
-
-          # Default bump: patch
-          bump="patch"
-
-          # Conventional Commits (best-effort):
-          # - BREAKING CHANGE / "type!:" => major
-          # - feat: => minor
-          if echo "${bodies}" | grep -Eq 'BREAKING CHANGE' || echo "${subjects}" | grep -Eq '^[a-zA-Z]+(\(.+\))?!:' || echo "${subjects}" | grep -Eq '^[a-zA-Z]+!:'; then
-            bump="major"
-          elif echo "${subjects}" | grep -Eq '^feat(\(.+\))?:'; then
-            bump="minor"
-          fi
-
-          case "${bump}" in
-            major)
-              major=$((major + 1))
-              minor=0
-              patch=0
-              ;;
-            minor)
-              minor=$((minor + 1))
-              patch=0
-              ;;
-            patch)
-              patch=$((patch + 1))
-              ;;
-          esac
-
-          version="${major}.${minor}.${patch}"
-          tag="${version}"
 
           if [ -z "${notes}" ]; then
             notes="- (no commits)"
           fi
 
           {
-            echo "RELEASE_VERSION=${version}"
+            echo "RELEASE_VERSION=${tag}"
             echo "RELEASE_TAG=${tag}"
             echo "RELEASE_SHA=$(git rev-parse HEAD)"
             echo "RELEASE_NOTES<<EOF"
@@ -110,27 +91,6 @@ jobs:
             -t "${image}:latest" \
             .
 
-      - name: Create tag (Gitea API)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY' > /tmp/tag.json
-          import json, os
-          payload = {
-            "tag_name": os.environ["RELEASE_TAG"],
-            "target": os.environ["RELEASE_SHA"],
-          }
-          print(json.dumps(payload))
-          PY
-
-          curl -fsS \
-            -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            -d @/tmp/tag.json \
-            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/tags"
-
       - name: Create release (Gitea API)
         shell: bash
         run: |
@@ -149,9 +109,24 @@ jobs:
           print(json.dumps(payload))
           PY
 
-          curl -fsS \
+          # Idempotent: skip if the release already exists for this tag.
+          status="$(curl -sS -o /tmp/release-create.json -w '%{http_code}' \
             -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             -d @/tmp/release.json \
-            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/releases"
+            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/releases" || true)"
+
+          if [ "${status}" = "201" ] || [ "${status}" = "200" ]; then
+            echo "Release created for tag ${RELEASE_TAG}"
+            exit 0
+          fi
+
+          if [ "${status}" = "409" ]; then
+            echo "Release already exists for tag ${RELEASE_TAG}, skipping create."
+            exit 0
+          fi
+
+          echo "ERROR: failed to create release (HTTP ${status}). Response:" >&2
+          cat /tmp/release-create.json >&2
+          exit 1
