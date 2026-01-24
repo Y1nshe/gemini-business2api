@@ -1,0 +1,132 @@
+name: Release + Docker Hub
+
+on:
+  # Manual release strategy:
+  # - Push a SemVer tag (X.Y.Z) to trigger a release build + Docker image push.
+  # - main branch changes alone will NOT create releases.
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (SemVer: X.Y.Z). Leave empty to use the current ref."
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag + notes
+        shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          tag="${TAG_INPUT:-${GITHUB_REF_NAME:-}}"
+          if [ -z "${tag}" ]; then
+            echo "ERROR: missing release tag (push a tag like 1.2.3 or provide inputs.tag)" >&2
+            exit 1
+          fi
+
+          if ! echo "${tag}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: invalid tag '${tag}', expected SemVer X.Y.Z" >&2
+            exit 1
+          fi
+
+          # Ensure the build uses the tag's exact commit (workflow_dispatch defaults to main HEAD).
+          git checkout -f "${tag}"
+
+          # Prefer the previous reachable SemVer tag, so notes follow history even if tags are out of order.
+          prev_tag="$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' "${tag}^" 2>/dev/null || true)"
+
+          if [ -z "${prev_tag}" ]; then
+            # First release: keep notes bounded.
+            notes="$(git log --first-parent --pretty=format:'- %s (%h)' -n 50 || true)"
+          else
+            notes="$(git log --first-parent --pretty=format:'- %s (%h)' "${prev_tag}..${tag}" || true)"
+          fi
+
+          if [ -z "${notes}" ]; then
+            notes="- (no commits)"
+          fi
+
+          {
+            echo "RELEASE_VERSION=${tag}"
+            echo "RELEASE_TAG=${tag}"
+            echo "RELEASE_SHA=$(git rev-parse HEAD)"
+            echo "RELEASE_NOTES<<EOF"
+            echo "${notes}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+      - name: Login to Docker Hub
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Build + push linux/amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker buildx create --use --name gitea-builder || docker buildx use gitea-builder
+          docker buildx inspect --bootstrap
+
+          image="${{ secrets.DOCKERHUB_USERNAME }}/gemini2api"
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            -t "${image}:${RELEASE_VERSION}" \
+            -t "${image}:latest" \
+            .
+
+      - name: Create release (Gitea API)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > /tmp/release.json
+          import json, os
+          payload = {
+            "tag_name": os.environ["RELEASE_TAG"],
+            "target_commitish": "main",
+            "name": os.environ["RELEASE_TAG"],
+            "body": os.environ.get("RELEASE_NOTES", ""),
+            "draft": False,
+            "prerelease": False,
+          }
+          print(json.dumps(payload))
+          PY
+
+          # Idempotent: skip if the release already exists for this tag.
+          status="$(curl -sS -o /tmp/release-create.json -w '%{http_code}' \
+            -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d @/tmp/release.json \
+            "https://git.yinshe.xyz/api/v1/repos/yinshe/gemini-business2api/releases" || true)"
+
+          if [ "${status}" = "201" ] || [ "${status}" = "200" ]; then
+            echo "Release created for tag ${RELEASE_TAG}"
+            exit 0
+          fi
+
+          if [ "${status}" = "409" ]; then
+            echo "Release already exists for tag ${RELEASE_TAG}, skipping create."
+            exit 0
+          fi
+
+          echo "ERROR: failed to create release (HTTP ${status}). Response:" >&2
+          cat /tmp/release-create.json >&2
+          exit 1
