@@ -246,6 +246,7 @@ docker-compose pull && docker-compose up -d
 ### 更多文档
 
 - 支持的文件类型：[docs/SUPPORTED_FILE_TYPES.md](docs/SUPPORTED_FILE_TYPES.md)
+- 发版流程（维护者）：[docs/RELEASE.md](docs/RELEASE.md)
 
 ## 📸 功能展示
 
