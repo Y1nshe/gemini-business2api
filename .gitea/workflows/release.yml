@@ -51,9 +51,11 @@ jobs:
 
           if [ -z "${prev_tag}" ]; then
             # First release: keep notes bounded.
-            notes="$(git log --first-parent --pretty=format:'- %s (%h)' -n 50 || true)"
+            # Include all non-merge commits (feature branch commits included), exclude merge commits.
+            notes="$(git log --no-merges --pretty=format:'- %s (%h)' -n 200 || true)"
           else
-            notes="$(git log --first-parent --pretty=format:'- %s (%h)' "${prev_tag}..${tag}" || true)"
+            # Include all non-merge commits since the previous SemVer tag.
+            notes="$(git log --no-merges --pretty=format:'- %s (%h)' "${prev_tag}..${tag}" || true)"
           fi
 
           if [ -z "${notes}" ]; then
